@@ -1,0 +1,26 @@
+#!/bin/bash --login
+########## Define Resources Needed with SBATCH Lines ##########
+
+### SBATCH --account=cmse 
+#SBATCH --time=24:00:00             # limit of wall clock time - how long the job will run (same as -t)
+#SBATCH --ntasks=1                  # number of tasks - how many tasks (nodes) that you require (same as -n)
+#####SBATCH --cpus-per-task=10           # number of CPUs (or cores) per task (same as -c)
+#SBATCH --mem=16G                    # memory required per node - amount of memory (in bytes)
+#SBATCH --job-name syn-4      # you can give your job a name for easier identification (same as -J)
+#SBATCH --gres=gpu:1 
+#SBATCH -C [intel18|intel16]
+ 
+########## Command Lines to Run ##########
+ 
+### module load ...                 ### load necessary modules, e.g.
+module load icc/2017.4.196-GCC-6.4.0-2.28
+module load impi/2017.3.196
+module load Python/3.6.3
+source myPyEnv/bin/activate
+
+cd /mnt/home/hejieqia/research/2d-synthesis                  ### change to the directory where your code is located
+
+# python synthesis_l2.py --test_id 11 --image_id 20 --K 16 --Q 4 --J 4 --n 128 --jacob True --max_epoch 10          ### call your executable
+python syn2d_pt.py --test_id 4 --cov 0 --n 128 --layer2 1  --initial_type 'uniform' --K 8 --J 4 --Q 2 --sigma_low_pass 7 --min_error 1e-8 --nit 2000 --lr 0.01 --err_it 50
+
+scontrol show job $SLURM_JOB_ID     ### write job information to output file
