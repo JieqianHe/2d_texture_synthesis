@@ -32,13 +32,14 @@ parser.add_argument('--sigma_low_pass', type=float, default=5, help='variance of
 parser.add_argument('--zeta', type=float, default=1.2, help='bias over y direction of mother wavelet')
 parser.add_argument('--eta', type=float, default=0.75 * pi, help='central frequency of mother wavelet')
 parser.add_argument('--a', type=int, default=2, help='parameter to dilate wavelets')
-parser.add_argument('--min_error', type=float, default=1e-12, help='how much error want to reduce to relative to initial error')
+parser.add_argument('--min_error', type=float, default=1e-9, help='how much error want to reduce to relative to initial error')
 parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
 parser.add_argument('--nit', type=int, default=500, help='iteration interval to save')
 parser.add_argument('--err_it', type=int, default=50, help='iteration interval to append error')
 parser.add_argument('--initial_type', type=str, default='uniform', help='type of initial noise')
 parser.add_argument('--layer2', type=int, default=0, help='whether to do 2nd layer scattering')
 parser.add_argument('--cov', type=int, default=0, help='whether to compute covariance')
+parser.add_argument('--eps', type=float, default=0.001, help='epsilon in barycenter algorithm')
 opt = parser.parse_args()
  
 # read parameters
@@ -60,6 +61,7 @@ err_it = opt.err_it
 initial_type = opt.initial_type
 layer2 = bool(opt.layer2)
 cov = bool(opt.cov)
+eps = opt.eps
 
 def initial_scat(n, K, J, Q, sigma, sigma_low_pass, zeta, eta, a):
     psi_hat = gabor_wavelet_family_freq_2d(n, K, J, Q, sigma, zeta, eta, a)
@@ -145,7 +147,7 @@ def WassersteinBarycenter(C, pk, lamb, nit = 100000, eps = 1/500, tol_dif = 1e-3
     return np.mean(uitav, 1)
 
 def layer1_ground_distance(K, J, Q, nnorm = 2):
-    n = 1 + K * (J * Q + 1)
+    n = int(K * (J * Q + 1))
     
     g = np.zeros((n,n))
     x = np.arange(0,J*Q + 1, 1)
@@ -163,9 +165,8 @@ def layer1_ground_distance(K, J, Q, nnorm = 2):
     dangle2 = K - dangle1
     dangle = np.min(np.concatenate((dangle1,dangle2), 2), 2)
     
-    g[1:, 1:] = dscale**nnorm + dangle**nnorm
-    g[0, 1:] = (np.flip(X[:,0], 0) + 3)**nnorm
-    g[1:, 0] = (np.flip(X[:,0], 0) + 3)**nnorm
+    g = dscale**nnorm + dangle**nnorm
+    
     return g
 
 def synthesis(s_target, test_id, ind, scat, n, min_error, err_it, nit, is_complex = False, initial_type = 'gaussian'):
@@ -238,45 +239,88 @@ s2 = scat(target_hat2)
 print('looking for barycenter...')
 g = layer1_ground_distance(K, J, Q)
 g = g/np.median(g)
-p1 = s1.data.cpu().numpy().reshape(-1,1)
-p2 = s2.data.cpu().numpy().reshape(-1,1)
+p10 = s1[:1].data.cpu().numpy().reshape(-1,1)
+p20 = s2[:1].data.cpu().numpy().reshape(-1,1)
+
+p1 = s1[1:].data.cpu().numpy().reshape(-1,1)
+p2 = s2[1:].data.cpu().numpy().reshape(-1,1)
+
+p10 = p10 / np.sum(p1) 
+p20 = p20 / np.sum(p2)
+print('p10: ', p10)
+print('p20: ', p20)
 p1 = p1 / np.sum(p1) # transform into probability distribution
 p2 = p2 / np.sum(p2)
+
 pk = np.concatenate((p1, p2), 1)
 lamb = np.ones(2).reshape(2,1)/2
-res = WassersteinBarycenter(g/np.median(g), pk, lamb, eps = 0.001, tol_dif = 1e-6)
-#np.save('./result%d/scattering_barycenter.npy'%test_id, res)
-#np.save('s11.npy', p1)
-#np.save('s21.npy', p2)
-#np.save('g.npy', g / np.median(g))
+res0 = (p10 + p20) / 2
+print('p0_middle: ', res0)
 
-bc = res[1:].reshape(K, J*Q+1)
-K1 = 16
-J1 = 5
-Q1 = 4
-bc_target = np.zeros((K1,J1*Q1 + 1))
-for k in range(K1):
-    for j in range(J1*Q1+1):
-        bc_target[k,j] = bc[4*k, 2*j]
-s_target_numpy = np.concatenate((res[0].reshape(1,1), bc_target.reshape(-1,1)), 0)
+res = WassersteinBarycenter(g/np.median(g), pk, lamb, eps = eps, tol_dif = 1e-6)
 
-s_target = torch.from_numpy(s_target_numpy / np.sum(s_target_numpy)).float()
+#s1_ = p1.reshape(K, -1)
+#s2_ = p2.reshape(K, -1)
+#s_bc_ = res.reshape(K, -1)
+#s1_cut = np.zeros((16,21))
+#s2_cut = np.zeros((16,21))
+#sbc_cut = np.zeros((16,21))
 
-scat1 = initial_scat(n, K1, J1, Q1, sigma, sigma_low_pass, zeta, eta, a)
+#for i in range(16):
+#    for j in range(20):
+#        s1_cut[i,j] = np.mean(s1_[(4*i):(4*i + 4), (2*j):(2*j + 2)])
+#        s2_cut[i,j] = np.mean(s2_[(4*i):(4*i + 4), (2*j):(2*j + 2)])
+#        sbc_cut[i,j] = np.mean(s_bc_[(4*i):(4*i + 4), (2*j):(2*j + 2)])
+#    s1_cut[i,20] = np.mean(s1_[(4*i):(4*i + 4), 40])
+#    s2_cut[i,20] = np.mean(s2_[(4*i):(4*i + 4), 40])
+#    sbc_cut[i,20] = np.mean(s_bc_[(4*i):(4*i + 4), 40])
+#print('p10:', p10.shape)
+#print('s1_cut', s1_cut.shape)    
+#s1 = torch.from_numpy(np.concatenate((p10.reshape(1,1), s1_cut.reshape(-1,1)), 0)).float()
+#s2 = torch.from_numpy(np.concatenate((p20.reshape(1,1), s2_cut.reshape(-1,1)), 0)).float()
+s_target = torch.from_numpy(np.concatenate((res0.reshape(1,1), res.reshape(-1,1)), 0)).float()
 if torch.cuda.is_available():
-    scat1 = scat1.cuda()
-    target_hat1 = target_hat1.cuda()
-    target_hat2 = target_hat2.cuda()
+    s1 = s1.cuda()
+    s2 = s2.cuda()
     s_target = s_target.cuda()
-s1 = scat1(target_hat1)
-s2 = scat1(target_hat2)
-np.save('./result%d/s1.npy'%test_id, (s1 / torch.sum(s1)).data.cpu().numpy())
-np.save('./result%d/s2.npy'%test_id, (s2/ torch.sum(s2)).data.cpu().numpy())
+    
+#np.save('./result%d/scattering_barycenter.npy'%test_id, res)
+#np.save('./result%d/s11.npy'%test_id, p1)
+#np.save('./result%d/s21.npy'%test_id, p2)
+# #np.save('g.npy', g / np.median(g))
+# print('p10:', p10)
+# print('p20:', p20)
+# print('pmiddle:',res0)
+
+# bc = res.reshape(K, J*Q+1)
+#K1 = 16
+#J1 = 5
+#Q1 = 4
+# bc_target = np.zeros((K1,J1*Q1 + 1))
+# for k in range(K1):
+#     for j in range(J1*Q1+1):
+#         bc_target[k,j] = bc[4*k, 2*j]
+# s_target_numpy = np.concatenate((res0.reshape(1,1), bc_target.reshape(-1,1)), 0)
+
+# #s_target = torch.from_numpy(s_target_numpy / np.sum(s_target_numpy)).float()
+# s_target = torch.from_numpy(s_target_numpy).float()
+
+#scat1 = initial_scat(n, K1, J1, Q1, sigma, sigma_low_pass, zeta, eta, a)
+#if torch.cuda.is_available():
+#    scat1 = scat1.cuda()
+#     target_hat1 = target_hat1.cuda()
+#     target_hat2 = target_hat2.cuda()
+#     s_target = s_target.cuda()
+# s1 = scat1(target_hat1)
+# s2 = scat1(target_hat2)
+
+np.save('./result%d/s1.npy'%test_id, s1.data.cpu().numpy())
+np.save('./result%d/s2.npy'%test_id, s2.data.cpu().numpy())
 np.save('./result%d/s_bc.npy'%test_id, s_target.data.cpu().numpy())
 
 print('synthesizing image ' + str(id_all[0]))
-synthesis(s1/torch.sum(s1), test_id, id_all[0], scat1, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
+synthesis(s1, test_id, id_all[0], scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
 print('synthesizing image ' + str(id_all[1]))
-synthesis(s2/torch.sum(s2), test_id, id_all[1], scat1, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
+synthesis(s2, test_id, id_all[1], scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
 print('synthesizing image barycenter')
-synthesis(s_target, test_id, 1415, scat1, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
+synthesis(s_target, test_id, 1415, scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
