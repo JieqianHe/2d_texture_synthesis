@@ -63,24 +63,87 @@ layer2 = bool(opt.layer2)
 cov = bool(opt.cov)
 eps = opt.eps
 
-def initial_scat(n, K, J, Q, sigma, sigma_low_pass, zeta, eta, a):
-    psi_hat = gabor_wavelet_family_freq_2d(n, K, J, Q, sigma, zeta, eta, a)
-    phi_hat = low_pass_freq(n, sigma_low_pass, sigma_low_pass)
+def layer1_ground_distance(K, J, Q, nnorm = 2):
+    n = int(K * (J * Q + 1))
+    
+    g = np.zeros((n,n))
+    x = np.arange(0,J*Q + 1, 1)
+    y = np.arange(K)
+    
+    X,Y = np.meshgrid(x,y)
+    X,Y = X.reshape((-1,1)), Y.reshape((-1,1))
+    ind = np.concatenate((X,Y), 1)
+    
+    ind1 = np.expand_dims(ind, 0)
+    ind2 = np.expand_dims(ind, 1)
+    
+    dscale = np.abs(ind1[:,:,0] - ind2[:,:,0])
+    dangle1 = np.expand_dims(np.abs(ind1[:,:,1] - ind2[:,:,1]), 2)
+    dangle2 = K - dangle1
+    dangle = np.min(np.concatenate((dangle1,dangle2), 2), 2)
+    
+    g = dscale**nnorm + dangle**nnorm
+    
+    return g
+    
+def wavelet_euc_axis(K,J,Q):
+    # K : number of angles in half plane
+    x = np.zeros((2*K,int(J*Q+1),2))
+    for k in range(2*K):
+        for j in range(int(J*Q+1)):
+            r = 2**(-j/Q)
+            a = pi*k / K
+            x[k,j,0] = r*np.cos(a)
+            x[k,j,1] = r*np.sin(a)
+    return x
 
-    psi_hat = np.swapaxes(psi_hat, 0, 2)
-    psi_hat = np.swapaxes(psi_hat, 1, 3) # K * J * n * n
-    phi_hat_real = torch.from_numpy(np.real(np.fft.fftshift(phi_hat, axes = (0,1)))).float()
-    phi_hat_imag = torch.from_numpy(np.imag(np.fft.fftshift(phi_hat, axes = (0,1)))).float()
-    psi_hat_real = torch.from_numpy(np.real(np.fft.fftshift(psi_hat, axes = (2,3)))).float()
-    psi_hat_imag = torch.from_numpy(np.imag(np.fft.fftshift(psi_hat, axes = (2,3)))).float()
-    if torch.cuda.is_available():
-        psi_hat_real = psi_hat_real.cuda()
-        psi_hat_imag = psi_hat_imag.cuda()  
-        phi_hat_real = phi_hat_real.cuda()
-        phi_hat_imag = phi_hat_imag.cuda()
-    # initialize scattering module
-    scat = scattering_2d_1layer(phi_hat_real, phi_hat_imag, psi_hat_real, psi_hat_imag)
-    return scat
+def euc_to_polar(x,J,K):
+    # transfer euclidean to polar axis with log scale
+    y = np.zeros(x.shape)
+    y[0,0] = - J - 1
+    y[1:,0] = np.log2(np.sqrt(x[1:,0]**2 + x[1:,1]**2))
+    y[:,1] = np.arctan2(x[:,1],x[:,0])
+    ind = np.where(y[:,1] < 0)
+    y[ind,1] = y[ind,1] + math.pi
+    y[:,1] = y[:,1] * K / math.pi
+    
+    return y
+
+def scat_stat_polar_axis_layer2(K,J,Q):
+    x_wave = wavelet_euc_axis(K,J,Q)
+    x_low = np.zeros((1,2))
+    ax = x_low
+    for j1 in range(int(J*Q)):
+        ax = np.concatenate((ax, x_wave[:K,j1,:]),  0)
+        for k1 in range(K):
+            x_1 = x_wave[k1,j1,:]
+            x_2 = x_wave[:,(j1+1):,:]
+            x_temp  = x_1 + x_2
+            ax = np.concatenate((ax, np.reshape(x_temp, (-1,2))), 0)
+    ax_euc = np.concatenate((ax, x_wave[:K,-1,:]),0)
+    ax_polar = euc_to_polar(ax_euc,J,K)
+    return ax_euc, ax_polar
+
+
+def layer2_ground_distance(K,J,Q, nnorm = 2):
+    ax_euc, ax_polar = scat_stat_polar_axis_layer2(K,J,Q)
+    n = ax_polar.shape[0]
+    r = ax_polar[:,0]
+    a = ax_polar[:,1]
+    
+    r1 = np.expand_dims(r,0)
+    r2 = np.expand_dims(r,1)
+    dscale = np.abs(r1 - r2)
+    
+    a1 = np.expand_dims(a,0)
+    a2 = np.expand_dims(a,1)
+    dangle1 = np.expand_dims(np.abs(a1 - a2),2)
+    dangle2 = K - dangle1
+    dangle = np.min(np.concatenate((dangle1,dangle2), 2), 2)
+    
+    g = np.zeros((n,n))
+    g = dscale**nnorm + dangle**nnorm
+    return g
 
 class scattering_2d_1layer(torch.nn.Module):
     def __init__(self, phi_hat_real, phi_hat_imag, psi_hat_real, psi_hat_imag):
@@ -99,6 +162,64 @@ class scattering_2d_1layer(torch.nn.Module):
                                        (self.psi_hat_real**2 + self.psi_hat_imag**2), 3), 2)
         s = torch.cat((a, b.flatten()), 0)
         return s
+    
+class scattering_2d_2layers(torch.nn.Module):
+    def __init__(self, phi_hat_real, phi_hat_imag, psi_hat_real, psi_hat_imag, second_all = False):
+        super(scattering_2d_2layers, self).__init__()
+        self.phi_hat_real = phi_hat_real # n * n
+        self.phi_hat_imag = phi_hat_imag # n * n
+        self.psi_hat_real = psi_hat_real # K * J * n * n
+        self.psi_hat_imag = psi_hat_imag # K * J * n * n
+        self.second_all = second_all # whether to do all pair of (j1, j2) at second layer or just j2 > j1
+        print('scattering type: 2 layers.')
+
+    def forward(self, x_hat):
+        K = int(self.psi_hat_real.size()[0]/2)
+        # x_hat: n * n * 2
+        s = 1/(2 * pi)**2 * torch.mean(torch.mean((x_hat[:,:,0]**2 + x_hat[:,:,1]**2) * (self.phi_hat_real**2 + self.phi_hat_imag**2), 0), 0)
+        s = s.unsqueeze(0)
+        J = self.psi_hat_real.size()[1]
+        for i in range(J):
+            temp_real = x_hat[:,:,0] * self.psi_hat_real[:K,i,:,:] - x_hat[:,:,1] * self.psi_hat_imag[:K,i,:,:]
+            temp_imag = x_hat[:,:,0] * self.psi_hat_imag[:K,i,:,:] + x_hat[:,:,1] * self.psi_hat_real[:K,i,:,:]
+            temp = torch.ifft(torch.cat((temp_real.unsqueeze(3), temp_imag.unsqueeze(3)), 3), 2) # K * n * n * 2
+
+            temp2 = torch.rfft(torch.sqrt(temp[:,:,:,0]**2 + temp[:,:,:,1]**2 + 1e-8), 2, onesided = False) # K * n * n * 2
+
+            a = 1/(2 * pi)**2 * torch.mean(torch.mean((temp2[:,:,:,0]**2 + temp2[:,:,:,1]**2) * (self.phi_hat_real**2 + self.phi_hat_imag**2), 2), 1)
+            s = torch.cat((s, a), 0)
+            if i < J - 1:
+                temp3 = (temp2[:,:,:,0]**2 + temp2[:,:,:,1]**2).unsqueeze(1).unsqueeze(2)
+                if self.second_all:
+                    temp4 = (self.psi_hat_real[:,:,:,:]**2 + self.psi_hat_imag[:,:,:,:]**2).unsqueeze(0)
+                else:
+                    temp4 = (self.psi_hat_real[:,(i+1):J,:,:]**2 + self.psi_hat_imag[:,(i+1):J,:,:]**2).unsqueeze(0)
+                b = 1/(2 * pi)**2 * torch.mean(torch.mean(temp3 * temp4, 4), 3)
+                s = torch.cat((s, b.flatten()), 0)
+
+        return s
+
+def initial_scat(n, K, J, Q, sigma, sigma_low_pass, zeta, eta, a, layer2):
+    psi_hat = gabor_wavelet_family_freq_2d(n, K, J, Q, sigma, zeta, eta, a)
+    phi_hat = low_pass_freq(n, sigma_low_pass, sigma_low_pass)
+
+    psi_hat = np.swapaxes(psi_hat, 0, 2)
+    psi_hat = np.swapaxes(psi_hat, 1, 3) # K * J * n * n
+    phi_hat_real = torch.from_numpy(np.real(np.fft.fftshift(phi_hat, axes = (0,1)))).float()
+    phi_hat_imag = torch.from_numpy(np.imag(np.fft.fftshift(phi_hat, axes = (0,1)))).float()
+    psi_hat_real = torch.from_numpy(np.real(np.fft.fftshift(psi_hat, axes = (2,3)))).float()
+    psi_hat_imag = torch.from_numpy(np.imag(np.fft.fftshift(psi_hat, axes = (2,3)))).float()
+    if torch.cuda.is_available():
+        psi_hat_real = psi_hat_real.cuda()
+        psi_hat_imag = psi_hat_imag.cuda()  
+        phi_hat_real = phi_hat_real.cuda()
+        phi_hat_imag = phi_hat_imag.cuda()
+    # initialize scattering module
+    if not layer2:
+        scat = scattering_2d_1layer(phi_hat_real, phi_hat_imag, psi_hat_real, psi_hat_imag)
+    else:
+        scat = scattering_2d_2layers(phi_hat_real, phi_hat_imag, psi_hat_real, psi_hat_imag)
+    return scat
 
 def low_pass_freq(n, sigma1, sigma2):
     pi = math.pi
@@ -146,28 +267,6 @@ def WassersteinBarycenter(C, pk, lamb, nit = 100000, eps = 1/500, tol_dif = 1e-3
         count += 1
     return np.mean(uitav, 1)
 
-def layer1_ground_distance(K, J, Q, nnorm = 2):
-    n = int(K * (J * Q + 1))
-    
-    g = np.zeros((n,n))
-    x = np.arange(0,J*Q + 1, 1)
-    y = np.arange(K)
-    
-    X,Y = np.meshgrid(x,y)
-    X,Y = X.reshape((-1,1)), Y.reshape((-1,1))
-    ind = np.concatenate((X,Y), 1)
-    
-    ind1 = np.expand_dims(ind, 0)
-    ind2 = np.expand_dims(ind, 1)
-    
-    dscale = np.abs(ind1[:,:,0] - ind2[:,:,0])
-    dangle1 = np.expand_dims(np.abs(ind1[:,:,1] - ind2[:,:,1]), 2)
-    dangle2 = K - dangle1
-    dangle = np.min(np.concatenate((dangle1,dangle2), 2), 2)
-    
-    g = dscale**nnorm + dangle**nnorm
-    
-    return g
 
 def synthesis(s_target, test_id, ind, scat, n, min_error, err_it, nit, is_complex = False, initial_type = 'gaussian'):
     print('shape of s:', s_target.size())
@@ -212,11 +311,9 @@ def synthesis(s_target, test_id, ind, scat, n, min_error, err_it, nit, is_comple
     np.save('./result%d/syn_error%d.npy'%(test_id, ind), np.asarray(error))
     np.save('./result%d/syn_result%d.npy'%(test_id, ind), x0.data.cpu().numpy())
 
-# initialize fine scattering
-scat = initial_scat(n, K, J, Q, sigma, sigma_low_pass, zeta, eta, a)
-#if torch.cuda.is_available():
- #   scat = scat.cuda()
-    
+# initialize scattering
+scat = initial_scat(n, K, J, Q, sigma, sigma_low_pass, zeta, eta, a, layer2)
+
 # extract two inputs    
 id_all = [14,15]    
 # load data
@@ -227,9 +324,11 @@ x_data = torch.from_numpy(x).float()
 m = int((x.shape[0] - n)/2)
 x_data = x_data[m:(m+n), m:(m+n), id_all]
 del x
+
 if torch.cuda.is_available():
     x_data = x_data.cuda()
     scat = scat.cuda()
+
 # compute scattering stat
 target_hat1 = torch.rfft(x_data[:,:,0], 2, onesided = False)
 s1 = scat(target_hat1)
@@ -237,7 +336,12 @@ target_hat2 = torch.rfft(x_data[:,:,1], 2, onesided = False)
 s2 = scat(target_hat2)
 # find scattering barycenter
 print('looking for barycenter...')
-g = layer1_ground_distance(K, J, Q)
+if not layer2:
+    g = layer1_ground_distance(K, J, Q)
+else:
+    g = layer2_ground_distance(K, J, Q)
+    g = g[1:,1:]
+    
 g = g/np.median(g)
 p10 = s1[:1].data.cpu().numpy().reshape(-1,1)
 p20 = s2[:1].data.cpu().numpy().reshape(-1,1)
@@ -257,7 +361,7 @@ lamb = np.ones(2).reshape(2,1)/2
 res0 = (p10 + p20) / 2
 print('p0_middle: ', res0)
 
-res = WassersteinBarycenter(g/np.median(g), pk, lamb, eps = eps, tol_dif = 1e-6)
+res = WassersteinBarycenter(g, pk, lamb, eps = eps, tol_dif = 1e-6)
 
 #s1_ = p1.reshape(K, -1)
 #s2_ = p2.reshape(K, -1)
