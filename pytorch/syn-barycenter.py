@@ -88,8 +88,8 @@ def layer1_ground_distance(K, J, Q, nnorm = 2):
     
 def wavelet_euc_axis(K,J,Q):
     # K : number of angles in half plane
-    x = np.zeros((2*K,int(J*Q+1),2))
-    for k in range(2*K):
+    x = np.zeros((K,int(J*Q+1),2))
+    for k in range(K):
         for j in range(int(J*Q+1)):
             r = 2**(-j/Q)
             a = pi*k / K
@@ -114,13 +114,13 @@ def scat_stat_polar_axis_layer2(K,J,Q):
     x_low = np.zeros((1,2))
     ax = x_low
     for j1 in range(int(J*Q)):
-        ax = np.concatenate((ax, x_wave[:K,j1,:]),  0)
+        ax = np.concatenate((ax, x_wave[:,j1,:]),  0)
         for k1 in range(K):
             x_1 = x_wave[k1,j1,:]
             x_2 = x_wave[:,(j1+1):,:]
             x_temp  = x_1 + x_2
             ax = np.concatenate((ax, np.reshape(x_temp, (-1,2))), 0)
-    ax_euc = np.concatenate((ax, x_wave[:K,-1,:]),0)
+    ax_euc = np.concatenate((ax, x_wave[:,-1,:]),0)
     ax_polar = euc_to_polar(ax_euc,J,K)
     return ax_euc, ax_polar
 
@@ -174,14 +174,14 @@ class scattering_2d_2layers(torch.nn.Module):
         print('scattering type: 2 layers.')
 
     def forward(self, x_hat):
-        K = int(self.psi_hat_real.size()[0]/2)
+        #K = int(self.psi_hat_real.size()[0]/2)
         # x_hat: n * n * 2
         s = 1/(2 * pi)**2 * torch.mean(torch.mean((x_hat[:,:,0]**2 + x_hat[:,:,1]**2) * (self.phi_hat_real**2 + self.phi_hat_imag**2), 0), 0)
         s = s.unsqueeze(0)
         J = self.psi_hat_real.size()[1]
         for i in range(J):
-            temp_real = x_hat[:,:,0] * self.psi_hat_real[:K,i,:,:] - x_hat[:,:,1] * self.psi_hat_imag[:K,i,:,:]
-            temp_imag = x_hat[:,:,0] * self.psi_hat_imag[:K,i,:,:] + x_hat[:,:,1] * self.psi_hat_real[:K,i,:,:]
+            temp_real = x_hat[:,:,0] * self.psi_hat_real[:,i,:,:] - x_hat[:,:,1] * self.psi_hat_imag[:,i,:,:]
+            temp_imag = x_hat[:,:,0] * self.psi_hat_imag[:,i,:,:] + x_hat[:,:,1] * self.psi_hat_real[:,i,:,:]
             temp = torch.ifft(torch.cat((temp_real.unsqueeze(3), temp_imag.unsqueeze(3)), 3), 2) # K * n * n * 2
 
             temp2 = torch.rfft(torch.sqrt(temp[:,:,:,0]**2 + temp[:,:,:,1]**2 + 1e-8), 2, onesided = False) # K * n * n * 2
@@ -202,6 +202,7 @@ class scattering_2d_2layers(torch.nn.Module):
 def initial_scat(n, K, J, Q, sigma, sigma_low_pass, zeta, eta, a, layer2):
     psi_hat = gabor_wavelet_family_freq_2d(n, K, J, Q, sigma, zeta, eta, a)
     phi_hat = low_pass_freq(n, sigma_low_pass, sigma_low_pass)
+#     phi_hat, psi_hat = LP_wavelet_family_freq_2d(n,J,Q,K)
 
     psi_hat = np.swapaxes(psi_hat, 0, 2)
     psi_hat = np.swapaxes(psi_hat, 1, 3) # K * J * n * n
@@ -315,7 +316,7 @@ def synthesis(s_target, test_id, ind, scat, n, min_error, err_it, nit, is_comple
 scat = initial_scat(n, K, J, Q, sigma, sigma_low_pass, zeta, eta, a, layer2)
 
 # extract two inputs    
-id_all = [14,15]    
+id_all = [18,19]    
 # load data
 # x = loadmat('/Users/kejiqing/Desktop/research/wavelet&EMD/code/images/mydata.mat')
 x = loadmat('./data/mydata.mat')
@@ -334,6 +335,7 @@ target_hat1 = torch.rfft(x_data[:,:,0], 2, onesided = False)
 s1 = scat(target_hat1)
 target_hat2 = torch.rfft(x_data[:,:,1], 2, onesided = False)
 s2 = scat(target_hat2)
+print('s1 size: ', s1.size())
 # find scattering barycenter
 print('looking for barycenter...')
 if not layer2:
@@ -341,18 +343,15 @@ if not layer2:
 else:
     g = layer2_ground_distance(K, J, Q)
     g = g[1:,1:]
-    
 g = g/np.median(g)
+print('g size: ', g.shape)
 p10 = s1[:1].data.cpu().numpy().reshape(-1,1)
 p20 = s2[:1].data.cpu().numpy().reshape(-1,1)
-
 p1 = s1[1:].data.cpu().numpy().reshape(-1,1)
 p2 = s2[1:].data.cpu().numpy().reshape(-1,1)
 
 p10 = p10 / np.sum(p1) 
 p20 = p20 / np.sum(p2)
-print('p10: ', p10)
-print('p20: ', p20)
 p1 = p1 / np.sum(p1) # transform into probability distribution
 p2 = p2 / np.sum(p2)
 
@@ -363,68 +362,56 @@ print('p0_middle: ', res0)
 
 res = WassersteinBarycenter(g, pk, lamb, eps = eps, tol_dif = 1e-6)
 
-#s1_ = p1.reshape(K, -1)
-#s2_ = p2.reshape(K, -1)
-#s_bc_ = res.reshape(K, -1)
-#s1_cut = np.zeros((16,21))
-#s2_cut = np.zeros((16,21))
-#sbc_cut = np.zeros((16,21))
+p1_numpy = np.concatenate((p10.reshape(1,1), p1.reshape(-1,1)), 0)
+p2_numpy = np.concatenate((p20.reshape(1,1), p2.reshape(-1,1)), 0)
+s_target = np.concatenate((res0.reshape(1,1), res.reshape(-1,1)), 0)
 
-#for i in range(16):
-#    for j in range(20):
-#        s1_cut[i,j] = np.mean(s1_[(4*i):(4*i + 4), (2*j):(2*j + 2)])
-#        s2_cut[i,j] = np.mean(s2_[(4*i):(4*i + 4), (2*j):(2*j + 2)])
-#        sbc_cut[i,j] = np.mean(s_bc_[(4*i):(4*i + 4), (2*j):(2*j + 2)])
-#    s1_cut[i,20] = np.mean(s1_[(4*i):(4*i + 4), 40])
-#    s2_cut[i,20] = np.mean(s2_[(4*i):(4*i + 4), 40])
-#    sbc_cut[i,20] = np.mean(s_bc_[(4*i):(4*i + 4), 40])
-#print('p10:', p10.shape)
-#print('s1_cut', s1_cut.shape)    
-#s1 = torch.from_numpy(np.concatenate((p10.reshape(1,1), s1_cut.reshape(-1,1)), 0)).float()
-#s2 = torch.from_numpy(np.concatenate((p20.reshape(1,1), s2_cut.reshape(-1,1)), 0)).float()
-s_target = torch.from_numpy(np.concatenate((res0.reshape(1,1), res.reshape(-1,1)), 0)).float()
-if torch.cuda.is_available():
-    s1 = s1.cuda()
-    s2 = s2.cuda()
-    s_target = s_target.cuda()
-    
-#np.save('./result%d/scattering_barycenter.npy'%test_id, res)
-#np.save('./result%d/s11.npy'%test_id, p1)
-#np.save('./result%d/s21.npy'%test_id, p2)
-# #np.save('g.npy', g / np.median(g))
-# print('p10:', p10)
-# print('p20:', p20)
-# print('pmiddle:',res0)
+np.save('./result%d/s11.npy'%test_id, p1_numpy)
+np.save('./result%d/s21.npy'%test_id, p2_numpy)
+np.save('./result%d/s_bc1.npy'%test_id, s_target)
 
-# bc = res.reshape(K, J*Q+1)
-#K1 = 16
-#J1 = 5
-#Q1 = 4
-# bc_target = np.zeros((K1,J1*Q1 + 1))
+s1 = torch.from_numpy(p1_numpy).float()
+s2 = torch.from_numpy(p2_numpy).float()
+s_bc = torch.from_numpy(s_target).float()
+
+# downsampling the scattering statistics for synthesis
+# p1 = p1.reshape(K, int(J*Q+1))
+# p2 = p2.reshape(K, int(J*Q+1))
+# res = res.reshape(K, int(J*Q+1))
+
+# K1 = 16
+# J1 = 5
+# Q1 = 4
+# p1_ = np.zeros((K1,J1*Q1 + 1))
+# p2_ = np.zeros((K1,J1*Q1 + 1))
+# p_bc_ = np.zeros((K1,J1*Q1 + 1))
 # for k in range(K1):
 #     for j in range(J1*Q1+1):
-#         bc_target[k,j] = bc[4*k, 2*j]
-# s_target_numpy = np.concatenate((res0.reshape(1,1), bc_target.reshape(-1,1)), 0)
+#         p1_[k,j] = p1[8*k, 4*j]
+#         p2_[k,j] = p2[8*k, 4*j]
+#         p_bc_[k,j] = res[8*k, 4*j]
+# s1 = torch.from_numpy(np.concatenate((p10.reshape(1,1), p1_.reshape(-1,1)), 0)).float()
+# s2 = torch.from_numpy(np.concatenate((p20.reshape(1,1), p2_.reshape(-1,1)), 0)).float()
+# s_bc = torch.from_numpy(np.concatenate((res0.reshape(1,1), p_bc_.reshape(-1,1)), 0)).float()
+s1 = s1 * n**2
+s2 = s2 * n**2
+s_bc = s_bc * n**2
 
-# #s_target = torch.from_numpy(s_target_numpy / np.sum(s_target_numpy)).float()
-# s_target = torch.from_numpy(s_target_numpy).float()
+# scat1 = initial_scat(n, K1, J1, Q1, sigma, sigma_low_pass, zeta, eta, a, layer2)
 
-#scat1 = initial_scat(n, K1, J1, Q1, sigma, sigma_low_pass, zeta, eta, a)
-#if torch.cuda.is_available():
-#    scat1 = scat1.cuda()
-#     target_hat1 = target_hat1.cuda()
-#     target_hat2 = target_hat2.cuda()
-#     s_target = s_target.cuda()
-# s1 = scat1(target_hat1)
-# s2 = scat1(target_hat2)
-
-np.save('./result%d/s1.npy'%test_id, s1.data.cpu().numpy())
-np.save('./result%d/s2.npy'%test_id, s2.data.cpu().numpy())
-np.save('./result%d/s_bc.npy'%test_id, s_target.data.cpu().numpy())
+if torch.cuda.is_available():
+#     scat1 = scat1.cuda()
+    s1 = s1.cuda()
+    s2 = s2.cuda()
+    s_bc = s_bc.cuda()
+# np.save('./result%d/s1.npy'%test_id, s1.data.cpu().numpy())
+# np.save('./result%d/s2.npy'%test_id, s2.data.cpu().numpy())
+# np.save('./result%d/s_bc.npy'%test_id, s_bc.data.cpu().numpy())
 
 print('synthesizing image ' + str(id_all[0]))
-synthesis(s1, test_id, id_all[0], scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
+synthesis(s1.squeeze(), test_id, id_all[0], scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
 print('synthesizing image ' + str(id_all[1]))
-synthesis(s2, test_id, id_all[1], scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
+synthesis(s2.squeeze(), test_id, id_all[1], scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
 print('synthesizing image barycenter')
-synthesis(s_target, test_id, 1415, scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
+synthesis(s_bc.squeeze(), test_id, 1819, scat, n, min_error, err_it, nit, initial_type = initial_type, is_complex = False)
+
